@@ -1,0 +1,1 @@
+"""Local novel pipeline."""

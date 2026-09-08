@@ -1,0 +1,123 @@
+import hashlib
+import json
+import logging
+import time
+
+import httpx
+
+from .alignment import align, body_fingerprint, catalog, extract_chapter, overlap
+from .crawler import Crawler, parse_toc
+
+
+class MultiSourceCrawler(Crawler):
+    def review(self, book_id, number, reason):
+        self.store.db.execute('INSERT INTO source_reviews(book_id,number,reason) VALUES(?,?,?) '
+                              'ON CONFLICT(book_id,number) DO UPDATE SET reason=excluded.reason',
+                              (book_id, number, reason))
+
+    def discover(self, book):
+        db = self.store.db
+        if not db.execute('SELECT toc_ready FROM books WHERE id=?', (book['id'],)).fetchone()[0]:
+            html = self.fetch(book['source_url'], book['encoding'])
+            catalog(html, book, book) # Verify work identity before fixing canonical IDs.
+            canonical = parse_toc(html, book)
+            with self.store.transaction():
+                for entry in canonical:
+                    db.execute('INSERT OR IGNORE INTO chapters(book_id,number,url,title) VALUES(?,?,?,?)',
+                               (book['id'], entry['number'], entry['url'], entry['title']))
+                db.execute('UPDATE books SET toc_ready=1 WHERE id=?', (book['id'],))
+        canonical = [dict(r) for r in db.execute('SELECT number,title FROM chapters WHERE book_id=? ORDER BY number', (book['id'],))]
+        for source in book['sources']:
+            signature = hashlib.sha256(json.dumps({'source': source, 'user_agent': self.cfg['user_agent']}, sort_keys=True).encode()).hexdigest()
+            old = db.execute('SELECT * FROM source_scans WHERE book_id=? AND source_id=?', (book['id'], source['id'])).fetchone()
+            if old and old['signature'] == signature:
+                if old['state'] == 'ready' or old['attempts'] >= 3 or old['retry_at'] > time.time():
+                    continue
+            attempts = old['attempts'] + 1 if old and old['signature'] == signature else 1
+            try:
+                entries = catalog(self.fetch(source['source_url'], source['encoding']), source, book)
+                mapping = align(canonical, entries)
+                with self.store.transaction():
+                    db.execute('DELETE FROM source_candidates WHERE book_id=? AND source_id=?', (book['id'], source['id']))
+                    for i, e in enumerate(entries):
+                        number, proof = mapping.get(i, (None, 'ambiguous-or-unmatched-title'))
+                        db.execute('INSERT INTO source_candidates(book_id,source_id,url,source_number,title,canonical_number,proof) '
+                                   'VALUES(?,?,?,?,?,?,?)', (book['id'], source['id'], e['url'], e['number'], e['title'], number, proof))
+                    db.execute('INSERT OR REPLACE INTO source_scans VALUES(?,?,?,?,?,?,?,?)',
+                               (book['id'], source['id'], signature, 'ready', attempts, 0, None, len(mapping)))
+                    db.execute("UPDATE chapters SET state='discovered' WHERE book_id=? AND source IS NULL AND state='source_review'",
+                               (book['id'],))
+                logging.info('%s: mapped %s/%s chapters from %s', book['id'], len(mapping), len(canonical), source['id'])
+            except Exception as exc:
+                db.execute('INSERT OR REPLACE INTO source_scans VALUES(?,?,?,?,?,?,?,?)',
+                           (book['id'], source['id'], signature, 'failed', attempts,
+                            time.time() + 300 * 2 ** (attempts - 1), str(exc)[:500], 0))
+                logging.warning('%s source %s: %s', book['id'], source['id'], exc)
+
+    def run(self, book, batch):
+        db = self.store.db
+        self.discover(book)
+        sources = {s['id']: s for s in book['sources']}
+        priority = {s['id']: i for i, s in enumerate(book['sources'])}
+        # Cache prior fingerprints once per batch, preserving punctuation-insensitive
+        # checks for databases created by the single-source version too.
+        existing = [(r['number'], body_fingerprint(json.loads(r['source']))[0]) for r in
+                    db.execute('SELECT number,source FROM chapters WHERE book_id=? AND source IS NOT NULL', (book['id'],))]
+        rows = db.execute("SELECT * FROM chapters WHERE book_id=? AND source IS NULL AND state IN "
+                          "('discovered','source_waiting','crawl_failed') ORDER BY CASE WHEN EXISTS "
+                          "(SELECT 1 FROM source_candidates sc WHERE sc.book_id=chapters.book_id "
+                          "AND sc.canonical_number=chapters.number AND sc.source_id=?) THEN 1 ELSE 0 END, number LIMIT ?",
+                          (book['id'], book['sources'][0]['id'], batch)).fetchall()
+        done = 0
+        for ch in rows:
+            candidates = [r for r in db.execute('SELECT * FROM source_candidates WHERE book_id=? AND canonical_number=?',
+                                               (book['id'], ch['number'])) if r['source_id'] in sources]
+            candidates.sort(key=lambda r: priority[r['source_id']])
+            reasons = []
+            waiting = False
+            accepted = False
+            for candidate in candidates:
+                if candidate['state'] == 'rejected' or candidate['attempts'] >= 3:
+                    reasons.append(f"{candidate['source_id']}: {candidate['error'] or 'attempt limit'}")
+                    continue
+                if candidate['retry_at'] > time.time():
+                    waiting = True
+                    continue
+                source = sources[candidate['source_id']]
+                attempts = candidate['attempts'] + 1
+                # Reserve the HTTP attempt before sending; crash does not reset its cap.
+                db.execute('UPDATE source_candidates SET attempts=?,retry_at=? WHERE id=?',
+                           (attempts, time.time() + 300 * 2 ** (attempts - 1), candidate['id']))
+                try:
+                    html = self.fetch(candidate['url'], source['encoding'])
+                    paragraphs = extract_chapter(html, source, candidate['title'], self.cfg)
+                    text, digest = body_fingerprint(paragraphs)
+                    duplicate = next((n for n, old in existing if overlap(text, old) >= .85), None)
+                    if duplicate is not None:
+                        raise ValueError(f'Body duplicates/overlaps accepted chapter {duplicate}')
+                    with self.store.transaction():
+                        db.execute("UPDATE chapters SET source=?,source_hash=?,state='crawled',error=NULL WHERE book_id=? AND number=? AND source IS NULL",
+                                   (json.dumps(paragraphs, ensure_ascii=False), digest, book['id'], ch['number']))
+                        db.execute('INSERT INTO source_provenance VALUES(?,?,?,?,?,?,?,?)',
+                                   (book['id'], ch['number'], source['id'], candidate['url'], candidate['source_number'],
+                                    candidate['title'], candidate['proof'] + '+page-title+length+dedup', digest))
+                        db.execute("UPDATE source_candidates SET state='accepted',error=NULL WHERE id=?", (candidate['id'],))
+                        db.execute('DELETE FROM source_reviews WHERE book_id=? AND number=?', (book['id'], ch['number']))
+                    existing.append((ch['number'], text))
+                    done += 1
+                    accepted = True
+                    break
+                except Exception as exc:
+                    transient = isinstance(exc, (httpx.TransportError, TimeoutError)) or (
+                        isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code in (408, 429, 500, 502, 503, 504))
+                    state = 'pending' if transient and attempts < 3 else 'rejected'
+                    waiting |= state == 'pending'
+                    db.execute('UPDATE source_candidates SET state=?,error=? WHERE id=?', (state, str(exc)[:500], candidate['id']))
+                    reasons.append(f"{source['id']}: {exc}")
+            if not accepted:
+                reason = '; '.join(reasons)[:1500] or 'No unambiguous matching chapter from available catalogs'
+                state = 'source_waiting' if waiting else 'source_review'
+                db.execute('UPDATE chapters SET state=?,error=? WHERE book_id=? AND number=?',
+                           (state, reason, book['id'], ch['number']))
+                self.review(book['id'], ch['number'], reason)
+        return done

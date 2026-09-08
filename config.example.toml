@@ -1,0 +1,80 @@
+database = "data/library.db"
+output_dir = "data/epub"
+
+[agent]
+provider = "codex_cli" # codex_cli | gemini_cli
+enabled = true
+# CLI quotas cannot enforce a hard provider-side token ceiling. See README.
+timeout_seconds = 180
+max_prompt_bytes = 50000
+max_output_tokens = 12000 # Gemini generation limit; reservation for Codex
+max_output_bytes = 200000
+
+[limits]
+calls_per_day = 48 # Global across books, translation AND editing, UTC day
+calls_total = 4000 # Covers 1597 x 2 stages plus bounded retries; never auto-raised
+reserved_tokens_per_day = 2000000
+reserved_tokens_total = 180000000
+min_call_interval_seconds = 30
+max_attempts_per_chapter_stage = 2 # Retries require explicit CLI command
+
+[jobs]
+crawl_batch = 5
+translate_batch = 2
+edit_batch = 2
+crawl_interval_seconds = 1800
+translate_interval_seconds = 1800
+edit_interval_seconds = 1800
+export_interval_seconds = 3600
+send_interval_seconds = 3600
+
+[crawler]
+request_interval_seconds = 3
+timeout_seconds = 20
+max_response_bytes = 2000000
+min_chapter_characters = 500
+max_chapter_characters = 30000
+user_agent = "" # Empty uses HTTPX's actual default identification (no browser impersonation)
+
+[kindle]
+enabled = false
+transport = "smtp" # smtp | gmail_connector (requires a Codex heartbeat bridge)
+smtp_host = "" # AWS SES SMTP or another SMTP provider
+smtp_port = 587
+sender = ""
+recipient = "" # Your ...@kindle.com address
+username_env = "KINDLE_SMTP_USERNAME"
+password_env = "KINDLE_SMTP_PASSWORD"
+max_message_bytes = 25000000 # MIME size, including base64; respects SMTP too
+
+[[books]]
+id = "han-men-bai-jia-zi"
+title = "Hàn Môn Bại Gia Tử"
+original_title = "寒门败家子"
+author = "寻北仪"
+expected_chapters = 1597
+completed = true
+enabled = true
+source_url = "https://fanqienovel.com/page/7143311019090119711"
+toc_selector = "a[href^='/reader/']"
+content_selector = ".muye-reader-content"
+encoding = "utf-8"
+glossary = "books/han-men-bai-jia-zi/glossary.json"
+
+# Canonical numbering above remains fixed. Sources below supply content by title
+# alignment; source chapter numbers are never directly used as canonical IDs.
+[[books.sources]]
+id = "piaotia"
+source_url = "https://www.piaotia.com/html/15/15289/"
+toc_selector = "a[href]"
+encoding = "gb18030"
+adapter = "piaotia"
+title_selector = "h1"
+
+[[books.sources]]
+id = "fanqie"
+source_url = "https://fanqienovel.com/page/7143311019090119711"
+toc_selector = "a[href^='/reader/']"
+encoding = "utf-8"
+content_selector = ".muye-reader-content"
+title_selector = "h1.muye-reader-title, h1:last-of-type"

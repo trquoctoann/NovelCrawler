@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "novel-crawler"
+version = "0.1.0"
+description = "Local incremental Chinese novel translation pipeline"
+requires-python = ">=3.11"
+dependencies = ["httpx>=0.28,<1", "beautifulsoup4>=4.12,<5"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8,<10"]
+
+[project.scripts]
+novel = "novel_crawler.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["novel_crawler*"]
+
+[tool.setuptools.package-data]
+novel_crawler = ["prompts/*.md", "prompts/*/*.md"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
