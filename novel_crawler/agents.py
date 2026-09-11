@@ -10,7 +10,8 @@ import re
 import copy
 
 
-MODELS = {'codex_cli': ('gpt-5.6-terra', 'medium'), 'gemini_cli': ('gemini-3.8-flash', 'high')}
+MODELS = {'codex_cli': ('gpt-5.6-terra', 'medium'), 'gemini_cli': ('gemini-3.8-flash', 'high'),
+          'agy': ('gemini-3.8-flash', 'high')}
 SCHEMA = {
     'type': 'object', 'additionalProperties': False,
     'required': ['title', 'paragraphs', 'continuity', 'issues'],
@@ -30,14 +31,41 @@ def output_schema(count):
     if type(count) is not int or count < 1:
         raise ValueError('Source paragraph count must be positive')
     schema = copy.deepcopy(SCHEMA)
+    schema['required'].append('glossary_readings')
+    schema['properties']['glossary_readings'] = {
+        'type': 'array', 'items': {'type': 'object', 'additionalProperties': False,
+            'required': ['paragraph_id', 'source', 'source_start', 'source_quote', 'translation', 'reason'],
+            'properties': {
+                'paragraph_id': {'type': 'integer', 'minimum': 1, 'maximum': count},
+                'source': {'type': 'string'}, 'source_start': {'type': 'integer', 'minimum': 0},
+                'source_quote': {'type': 'string'}, 'translation': {'type': 'string'},
+                'reason': {'type': 'string'}}}}
+    schema['required'].append('source_notes')
+    schema['properties']['source_notes'] = {
+        'type': 'array', 'items': {'type': 'object', 'additionalProperties': False,
+            'required': ['paragraph_ids', 'note'], 'properties': {
+                'paragraph_ids': {'type': 'array', 'items': {'type': 'integer', 'minimum': 1, 'maximum': count}},
+                'note': {'type': 'string'}}}}
+    schema['required'].append('terms')
+    schema['properties']['terms'] = {
+        'type': 'array', 'items': {'type': 'object', 'additionalProperties': False,
+            'required': ['source', 'translation', 'kind'], 'properties': {
+                'source': {'type': 'string'}, 'translation': {'type': 'string'},
+                'kind': {'type': 'string', 'enum': ['entity', 'preferred']}}}}
     paragraphs = schema['properties']['paragraphs']
     paragraphs.update(minItems=count, maxItems=count)
     paragraphs['items']['properties']['id'].update(minimum=1, maximum=count)
+    paragraphs['items']['properties']['join_previous'] = {'type': 'boolean'}
+    paragraphs['items']['required'].append('join_previous')
     return schema
 
 
 def executable(name):
     path = shutil.which(name)
+    if not path and name == 'agy' and os.name == 'nt':
+        candidate = Path(os.environ.get('LOCALAPPDATA', '')) / 'agy/bin/agy.exe'
+        if candidate.is_file():
+            path = str(candidate)
     if not path:
         raise RuntimeError(f'{name} CLI not installed')
     if os.name == 'nt' and Path(path).suffix.lower() in ('.cmd', '.ps1', '.bat'):
@@ -52,19 +80,26 @@ def executable(name):
     return [path]
 
 
-def run_process(command, prompt, cwd, timeout, max_bytes, env):
+def run_process(command, prompt, cwd, timeout, max_bytes, env, stop=None, output_path=None):
     flags = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
     # Files avoid pipe deadlocks on large output. Watch their size while running.
-    with tempfile.TemporaryFile() as stdin, tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
+    with tempfile.TemporaryFile() as stdin, (open(output_path, 'w+b') if output_path else tempfile.TemporaryFile()) as stdout, tempfile.TemporaryFile() as stderr:
         stdin.write(prompt.encode('utf-8'))
         stdin.seek(0)
         p = subprocess.Popen(command, stdin=stdin, stdout=stdout, stderr=stderr,
                              cwd=cwd, env=env, creationflags=flags,
                              start_new_session=os.name != 'nt')
         import time
+        job = None
         deadline = time.monotonic() + timeout
         try:
+            if os.name == 'nt':
+                from .processes import WindowsJob
+                job = WindowsJob()
+                job.attach(p)
             while p.poll() is None:
+                if stop is not None and stop.is_set():
+                    raise InterruptedError('Agent interrupted; reservation retained')
                 if time.monotonic() > deadline:
                     raise TimeoutError('Agent timed out; reservation retained; no automatic retry')
                 if os.fstat(stdout.fileno()).st_size + os.fstat(stderr.fileno()).st_size > max_bytes:
@@ -72,7 +107,9 @@ def run_process(command, prompt, cwd, timeout, max_bytes, env):
                 time.sleep(.1)
             if p.returncode:
                 stderr.seek(0)
-                detail = stderr.read(max_bytes).decode('utf-8', errors='replace')[-1800:]
+                stdout.seek(0)
+                # CLI quota errors can be emitted as JSON on stdout, not stderr.
+                detail = (stderr.read(max_bytes) + b'\n' + stdout.read(max_bytes)).decode('utf-8', errors='replace')[-1800:]
                 detail = re.sub(r'(?i)(Bearer\s+|sk-)[^\s"\']+', '[REDACTED]', detail)
                 raise RuntimeError(f'Agent exited {p.returncode}: {detail}')
             stdout.seek(0)
@@ -81,10 +118,11 @@ def run_process(command, prompt, cwd, timeout, max_bytes, env):
                 raise RuntimeError('Agent output exceeded byte limit')
             return output.decode('utf-8')
         finally:
+            if job is not None:
+                job.close()
             if p.poll() is None:
                 if os.name == 'nt':
-                    subprocess.run(['taskkill', '/PID', str(p.pid), '/T', '/F'],
-                                   capture_output=True, creationflags=flags, timeout=10)
+                    p.kill()
                 else:
                     os.killpg(p.pid, signal.SIGKILL)
                 p.wait(timeout=10)
@@ -97,6 +135,9 @@ class CliAgent:
         self.model, self.effort = MODELS[self.provider]
 
     def preflight(self):
+        if self.provider == 'agy':
+            from .antigravity import preflight
+            return preflight(self)
         command = executable('codex' if self.provider == 'codex_cli' else 'gemini')
         if self.provider == 'codex_cli':
             flags = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
@@ -109,11 +150,14 @@ class CliAgent:
     def generate(self, prompt):
         if not self.cfg['enabled']:
             raise RuntimeError('Agent disabled in config')
+        if self.provider == 'agy':
+            from .antigravity import generate
+            return generate(self, prompt)
         with tempfile.TemporaryDirectory(prefix='novel-agent-') as temp:
             root = Path(temp)
             schema = root / 'schema.json'
             payload = json.loads(prompt.rsplit('\nDATA:\n', 1)[1])
-            schema.write_text(json.dumps(output_schema(len(payload['source']))), encoding='utf-8')
+            schema.write_text(json.dumps(getattr(self, 'response_schema', output_schema(len(payload['source'])))), encoding='utf-8')
             env = os.environ.copy()
             # Do not accidentally bill an API key inherited from a development shell.
             for key in ('OPENAI_API_KEY', 'CODEX_API_KEY', 'GEMINI_API_KEY', 'GOOGLE_API_KEY',
@@ -130,7 +174,7 @@ class CliAgent:
                     '--output-schema', str(schema), '--output-last-message', str(result_file),
                     '--json', '-']
                 output = run_process(command, prompt, root, self.cfg['timeout_seconds'],
-                                     self.cfg['max_output_bytes'], env)
+                                     self.cfg['max_output_bytes'], env, getattr(self, 'stop', None))
                 if not result_file.exists() or result_file.stat().st_size > self.cfg['max_output_bytes']:
                     raise ValueError('Missing or oversized agent result')
                 content = result_file.read_text(encoding='utf-8')
@@ -165,10 +209,10 @@ class CliAgent:
                     '--model', self.model, '--prompt', 'Perform the supplied translation task; return JSON only.',
                     '--output-format', 'json', '--extensions', 'none', '--admin-policy', str(policy)]
                 output = run_process(command, prompt, root, self.cfg['timeout_seconds'],
-                                     self.cfg['max_output_bytes'], env)
+                                     self.cfg['max_output_bytes'], env, getattr(self, 'stop', None))
                 envelope = json.loads(output)
                 if envelope.get('error'):
-                    raise ValueError('Gemini returned an error')
+                    raise RuntimeError('Gemini returned an error: ' + str(envelope['error'])[:1000])
                 stats = envelope.get('stats', {}).get('models', {})
                 if not stats or any(model != self.model for model in stats):
                     raise ValueError('Gemini model could not be verified or CLI silently changed models')

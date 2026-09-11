@@ -34,6 +34,9 @@ class MultiSourceCrawler(Crawler):
                 if old['state'] == 'ready' or old['attempts'] >= 3 or old['retry_at'] > time.time():
                     continue
             attempts = old['attempts'] + 1 if old and old['signature'] == signature else 1
+            db.execute('INSERT OR REPLACE INTO source_scans VALUES(?,?,?,?,?,?,?,?)',
+                       (book['id'], source['id'], signature, 'fetching', attempts,
+                        time.time() + 300 * 2 ** (attempts - 1), None, 0))
             try:
                 entries = catalog(self.fetch(source['source_url'], source['encoding']), source, book)
                 mapping = align(canonical, entries)
@@ -45,9 +48,11 @@ class MultiSourceCrawler(Crawler):
                                    'VALUES(?,?,?,?,?,?,?)', (book['id'], source['id'], e['url'], e['number'], e['title'], number, proof))
                     db.execute('INSERT OR REPLACE INTO source_scans VALUES(?,?,?,?,?,?,?,?)',
                                (book['id'], source['id'], signature, 'ready', attempts, 0, None, len(mapping)))
-                    db.execute("UPDATE chapters SET state='discovered' WHERE book_id=? AND source IS NULL AND state='source_review'",
+                    db.execute("UPDATE chapters SET state='discovered' WHERE book_id=? AND source IS NULL AND state IN ('source_review','source_waiting')",
                                (book['id'],))
                 logging.info('%s: mapped %s/%s chapters from %s', book['id'], len(mapping), len(canonical), source['id'])
+            except InterruptedError:
+                raise
             except Exception as exc:
                 db.execute('INSERT OR REPLACE INTO source_scans VALUES(?,?,?,?,?,?,?,?)',
                            (book['id'], source['id'], signature, 'failed', attempts,
@@ -63,18 +68,38 @@ class MultiSourceCrawler(Crawler):
         # checks for databases created by the single-source version too.
         existing = [(r['number'], body_fingerprint(json.loads(r['source']))[0]) for r in
                     db.execute('SELECT number,source FROM chapters WHERE book_id=? AND source IS NOT NULL', (book['id'],))]
-        rows = db.execute("SELECT * FROM chapters WHERE book_id=? AND source IS NULL AND state IN "
-                          "('discovered','source_waiting','crawl_failed') ORDER BY CASE WHEN EXISTS "
+        catalog_waiting = any(not (scan := db.execute(
+            'SELECT state,attempts FROM source_scans WHERE book_id=? AND source_id=?',
+            (book['id'], source_id)).fetchone()) or
+            (scan['state'] != 'ready' and scan['attempts'] < 3) for source_id in sources)
+        by_chapter = {}
+        for candidate in db.execute('SELECT * FROM source_candidates WHERE book_id=?', (book['id'],)):
+            if candidate['source_id'] in sources:
+                by_chapter.setdefault(candidate['canonical_number'], []).append(candidate)
+        queued = db.execute("SELECT * FROM chapters WHERE book_id=? AND source IS NULL AND state IN "
+                          "('discovered','source_waiting','crawl_failed') "
+                          "ORDER BY CASE WHEN EXISTS "
                           "(SELECT 1 FROM source_candidates sc WHERE sc.book_id=chapters.book_id "
-                          "AND sc.canonical_number=chapters.number AND sc.source_id=?) THEN 1 ELSE 0 END, number LIMIT ?",
-                          (book['id'], book['sources'][0]['id'], batch)).fetchall()
+                          "AND sc.canonical_number=chapters.number AND sc.source_id=?) THEN 1 ELSE 0 END, number",
+                          (book['id'], book['sources'][0]['id'])).fetchall()
+        rows = []
+        for row in queued:
+            pending = [c for c in by_chapter.get(row['number'], []) if c['state'] == 'pending' and c['attempts'] < 3]
+            if (row['state'] == 'source_waiting' and not any(c['retry_at'] <= time.time() for c in pending)
+                    and (catalog_waiting or pending)):
+                continue # A waiting gap must not starve later available chapters.
+            rows.append(row)
+            if len(rows) >= batch:
+                break
         done = 0
         for ch in rows:
-            candidates = [r for r in db.execute('SELECT * FROM source_candidates WHERE book_id=? AND canonical_number=?',
-                                               (book['id'], ch['number'])) if r['source_id'] in sources]
+            if getattr(self, 'stop', None) is not None and self.stop.is_set():
+                break
+            candidates = by_chapter.get(ch['number'], [])
             candidates.sort(key=lambda r: priority[r['source_id']])
             reasons = []
-            waiting = False
+            # An unavailable catalog has not yet exhausted the configured sources.
+            waiting = catalog_waiting
             accepted = False
             for candidate in candidates:
                 if candidate['state'] == 'rejected' or candidate['attempts'] >= 3:
@@ -107,6 +132,8 @@ class MultiSourceCrawler(Crawler):
                     done += 1
                     accepted = True
                     break
+                except InterruptedError:
+                    raise
                 except Exception as exc:
                     transient = isinstance(exc, (httpx.TransportError, TimeoutError)) or (
                         isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code in (408, 429, 500, 502, 503, 504))

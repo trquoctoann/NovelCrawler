@@ -2,15 +2,23 @@ database = "data/library.db"
 output_dir = "data/epub"
 
 [agent]
-provider = "codex_cli" # codex_cli | gemini_cli
+# Set/bump style_revision explicitly when all existing edits must be reworked.
+# style_revision = "natural-vi-hanviet-han-layout-v3"
+provider = "codex_cli" # codex_cli | gemini_cli | agy
+# fallback_provider = "agy" # Optional: switch both stages only on Terra quota exhaustion
+# policy_fallback_provider = "codex_cli" # With provider="agy": chapter-local policy fallback, then manual input
+# contextual_glossary_review = true # Review ambiguous short-name matches without retranslating a whole chapter
 enabled = true
 # CLI quotas cannot enforce a hard provider-side token ceiling. See README.
 timeout_seconds = 180
 max_prompt_bytes = 50000
 max_output_tokens = 12000 # Gemini generation limit; reservation for Codex
 max_output_bytes = 200000
+quota_cooldown_seconds = 3600 # Earliest retry on a subsequent manual invocation
+retry_cooldown_seconds = 60 # Interrupted/transient calls; lifetime caps still apply
 
 [limits]
+# 0 disables an aggregate call/token ceiling; attempt and interval guards stay positive.
 calls_per_day = 48 # Global across books, translation AND editing, UTC day
 calls_total = 4000 # Covers 1597 x 2 stages plus bounded retries; never auto-raised
 reserved_tokens_per_day = 2000000
@@ -19,6 +27,7 @@ min_call_interval_seconds = 30
 max_attempts_per_chapter_stage = 2 # Retries require explicit CLI command
 
 [jobs]
+edit_priority_backlog = 8 # Prefer editing above this backlog; edit failures still allow translation
 crawl_batch = 5
 translate_batch = 2
 edit_batch = 2
@@ -38,7 +47,7 @@ user_agent = "" # Empty uses HTTPX's actual default identification (no browser i
 
 [kindle]
 enabled = false
-transport = "smtp" # smtp | gmail_connector (requires a Codex heartbeat bridge)
+transport = "smtp" # Automatic delivery in this manual run; gmail_connector is legacy outbox only
 smtp_host = "" # AWS SES SMTP or another SMTP provider
 smtp_port = 587
 sender = ""
@@ -60,6 +69,7 @@ toc_selector = "a[href^='/reader/']"
 content_selector = ".muye-reader-content"
 encoding = "utf-8"
 glossary = "books/han-men-bai-jia-zi/glossary.json"
+rendering_aliases = "books/han-men-bai-jia-zi/rendering-aliases.json"
 
 # Canonical numbering above remains fixed. Sources below supply content by title
 # alignment; source chapter numbers are never directly used as canonical IDs.

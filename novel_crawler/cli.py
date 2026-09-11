@@ -3,6 +3,7 @@ import json
 import logging
 from pathlib import Path
 import time
+import threading
 
 from .agents import CliAgent, executable
 from .config import load
@@ -13,14 +14,19 @@ from .epub import export_book
 from .store import Store, pipeline_lock
 from .translation import Translator, retry
 from .runtime import ensure_config, configure_logs, report, backup_daily
+from .runner import run_pipeline
+from .style import apply_style_revision
+from .policy_fallback import LanguageTranslator
+from .manual import import_submission
 
 
 def run_job(store, cfg, book, job):
+    apply_style_revision(store, cfg, book)
     if job == 'crawl':
         crawler = MultiSourceCrawler if book.get('sources') else Crawler
         return crawler(store, cfg['crawler']).run(book, cfg['jobs']['crawl_batch'])
     if job in ('translate', 'edit'):
-        return Translator(store, cfg, CliAgent(cfg['agent'])).run(book, job, cfg['jobs'][job + '_batch'])
+        return LanguageTranslator(store, cfg, CliAgent, threading.Event()).run(book, job, cfg['jobs'][job + '_batch'])
     if job == 'export':
         return str(export_book(store, book, cfg['output_dir']))
     if job == 'send':
@@ -64,7 +70,7 @@ def main(argv=None):
     parser.add_argument('--config', default='config.toml')
     commands = parser.add_subparsers(dest='command')
     start = commands.add_parser('start')
-    start.add_argument('--once', action='store_true', help='Run one scheduled cycle, then exit')
+    start.add_argument('--once', action='store_true', help='Run one concurrent batch, then exit')
     for name in ('init', 'status', 'tick', 'schedule', 'doctor', 'sources'):
         commands.add_parser(name)
     run = commands.add_parser('run')
@@ -75,6 +81,8 @@ def main(argv=None):
     again = commands.add_parser('retry')
     again.add_argument('--book', required=True)
     again.add_argument('--chapter', type=int, required=True)
+    manual = commands.add_parser('manual-import')
+    manual.add_argument('--file', required=True, help='Reviewed submission.json generated for a blocked chapter')
     args = parser.parse_args(argv)
     args.command = args.command or 'start'
     logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
@@ -82,6 +90,13 @@ def main(argv=None):
     cfg = load(args.config)
     configure_logs(cfg['database'])
     logging.getLogger('httpx').setLevel(logging.WARNING)
+    if args.command == 'status':
+        # The runner owns the process lock for its lifetime; status is a durable
+        # snapshot and must remain readable while both workers are active.
+        status_path = cfg['database'].parent / 'status.txt'
+        print(status_path.read_text(encoding='utf-8') if status_path.exists() else
+              'Chưa có báo cáo tiến độ. Chạy start.cmd để bắt đầu.')
+        return 0
     if args.command in ('start', 'schedule'):
         logging.info('Runner started. Progress: %s; stop with Ctrl+C.', cfg['database'].parent / 'status.txt')
     if args.command == 'doctor':
@@ -92,6 +107,18 @@ def main(argv=None):
                 print(exc)
         print('No inference made. Login, model access and Kindle delivery still require live verification.')
         return 0
+    if args.command == 'start':
+        with pipeline_lock(cfg['database']):
+            # A fresh manual invocation resumes after a previous graceful stop.
+            (cfg['database'].parent / 'stop.request').unlink(missing_ok=True)
+            (cfg['database'].parent / 'drain.request').unlink(missing_ok=True)
+            store = Store(cfg['database'])
+            try:
+                for book in cfg['books']:
+                    store.register(book)
+                return 1 if run_pipeline(store, cfg, once=getattr(args, 'once', False)) else 0
+            finally:
+                store.close()
     while True:
         # Reload on each cycle: editing config changes batch/quota without restarting.
         cfg = load(args.config)
@@ -105,16 +132,6 @@ def main(argv=None):
                     store.register(book)
                 if args.command == 'init':
                     print(cfg['database'])
-                elif args.command == 'status':
-                    for book in cfg['books']:
-                        rows = store.db.execute('SELECT state,COUNT(*) AS count FROM chapters WHERE book_id=? GROUP BY state', (book['id'],))
-                        print(book['id'], json.dumps([dict(r) for r in rows], ensure_ascii=False))
-                    print('calls', json.dumps(dict(store.db.execute('SELECT COUNT(*) AS count,COALESCE(SUM(reserved),0) AS reserved_tokens FROM calls').fetchone())))
-                    for row in store.db.execute('SELECT book_id,number,state,error FROM chapters WHERE error IS NOT NULL'):
-                        print(dict(row))
-                    for row in store.db.execute('SELECT book_id,state,error FROM delivery'):
-                        print(dict(row))
-                    print(report(store, cfg))
                 elif args.command == 'sources':
                     for book in cfg['books']:
                         if book.get('sources') and book['enabled']:
@@ -126,6 +143,9 @@ def main(argv=None):
                     report(store, cfg)
                     if failures and (args.command == 'tick' or getattr(args, 'once', False)):
                         return 1
+                elif args.command == 'manual-import':
+                    print('Imported:', import_submission(store, cfg, args.file))
+                    report(store, cfg)
                 else:
                     book = next((b for b in cfg['books'] if b['id'] == args.book), None)
                     if not book:

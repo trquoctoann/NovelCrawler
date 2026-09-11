@@ -1,0 +1,52 @@
+import pytest
+
+from novel_crawler.numbers import numeric_literals_match
+
+
+@pytest.mark.parametrize('source,target,valid', [
+    ('欠四十贯钱。', 'Nợ 40 quan.', True),
+    ('四十里，十天。', '40 dặm, mười ngày.', True),
+    ('一百零二人。', '102 người.', True),
+    ('两百人。', '200 người.', True),
+    ('第一十天。', 'Ngày thứ 10.', True),
+    ('四十贯。', '50 quan.', False),
+    ('四十贯。', '40 quan và 40 quan.', False),
+    ('三十和四十。', '40 và 30.', False),
+    ('四十贯。', '040 quan.', False),
+    ('三四十人。', '40 người.', False),
+    ('两三人。', '3 người.', False),
+    ('四十贯。', '4.0 quan.', False),
+    ('有2人。', '20 người.', False),
+    ('有2人。', '2 người.', True),
+    ('四十贯。', 'Bốn mươi quan.', True),
+    ('五十两银子。', '50 lạng bạc.', True),
+    ('五十两银子。', '52 lạng bạc.', False),
+    ('五十两。', '50 lạng.', True),
+    ('五十两。', '500 lạng.', False),
+    ('两百两银子。', '200 lạng bạc.', True),
+    ('一千两百两银子。', '1200 lạng bạc.', True),
+    ('一两银子。', '1 lạng bạc.', True),
+    ('二两银子。', '2 lạng bạc.', True),
+    ('一两个人。', '1 người.', False),
+    ('一两个人。', '2 người.', False),
+    ('三四十两银子。', '40 lạng bạc.', False),
+    ('五十两，二十两。', '50 lạng, 20 lạng.', True),
+    ('五十两，二十两。', '20 lạng, 50 lạng.', False),
+    ('王四海有五十两，给了我五十两。', 'Tứ Hải có 50 lạng, cho ta 50 lạng.', True),
+    ('两千一百万斤盐，两万一千两银子。', '21000000 cân muối, 21000 lạng bạc.', True),
+    ('五万大军。', '5 vạn quân.', True),
+    ('五万大军。', '5 nghìn quân.', False),
+    ('五万人。', '50000 người.', True),
+    ('一亿两银子。', '100000000 lạng bạc.', True),
+    ('一亿两银子。', '100000002 lạng bạc.', False),
+    ('三四万人。', '40000 người.', False),
+    ('有5人。', 'Có 5 vạn người.', False),
+    ('有5万人。', 'Có 5 vạn người.', True),
+    ('五个人。', '5 triệu người.', False),
+    ('五万人。', '50.000 người.', True),
+    ('五十人。', '50.000 người.', False),
+    ('五万人。', '50,000 người.', False),
+    ('五个人，亿万富翁。', '5 người, nhà đại phú.', True),
+])
+def test_numeric_values(source, target, valid):
+    assert numeric_literals_match(source, target) is valid

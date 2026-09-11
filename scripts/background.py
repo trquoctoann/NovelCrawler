@@ -30,7 +30,7 @@ def main():
             stop.unlink(missing_ok=True)
             (folder / 'runner.json').write_text(json.dumps({'pid': os.getpid(), 'started': time.time()}))
             from novel_crawler.cli import main as pipeline
-            pipeline(['start'])
+            pipeline(['schedule']) # Legacy opt-in only; start.cmd now runs manually.
         finally:
             (folder / 'runner.json').unlink(missing_ok=True)
             lock.__exit__(None, None, None)

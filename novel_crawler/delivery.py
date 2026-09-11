@@ -47,18 +47,20 @@ def send_book(store, book, config):
     if not cfg['smtp_host']:
         raise ValueError('Configure SMTP host')
     username, password = os.environ[cfg['username_env']], os.environ[cfg['password_env']]
-    store.db.execute('INSERT INTO delivery(book_id,sha256,state,message_id) VALUES(?,?,?,?)',
-                     (book['id'], verify_epub(path), 'sending', msg['Message-ID']))
     try:
         with smtplib.SMTP(cfg['smtp_host'], cfg['smtp_port'], timeout=30) as smtp:
             smtp.starttls(context=ssl.create_default_context())
             smtp.login(username, password)
+            # Connecting/authenticating cannot deliver mail. Reserve only when
+            # transmission is about to start; earlier failures are safe to retry.
+            store.db.execute('INSERT INTO delivery(book_id,sha256,state,message_id) VALUES(?,?,?,?)',
+                             (book['id'], verify_epub(path), 'sending', msg['Message-ID']))
             refused = smtp.sendmail(cfg['sender'], [cfg['recipient']], payload)
             if refused:
                 raise RuntimeError('Recipient refused by SMTP')
-        store.db.execute("UPDATE delivery SET state='submitted' WHERE book_id=?", (book['id'],))
+            store.db.execute("UPDATE delivery SET state='submitted' WHERE book_id=?", (book['id'],))
         return 'submitted' # SMTP accepted, NOT a claim of arrival on the physical Kindle
     except Exception as exc:
-        store.db.execute("UPDATE delivery SET state='unknown',error=? WHERE book_id=?",
+        store.db.execute("UPDATE delivery SET state='unknown',error=? WHERE book_id=? AND state='sending'",
                          (type(exc).__name__, book['id']))
         raise

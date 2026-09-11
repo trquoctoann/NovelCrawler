@@ -1,6 +1,6 @@
 param(
     [ValidateSet('run', 'once', 'status', 'test', 'demo', 'sources', 'background', 'stop')]
-    [string]$Mode = 'background'
+    [string]$Mode = 'run'
 )
 $ErrorActionPreference = 'Stop'
 Set-Location -LiteralPath $PSScriptRoot
@@ -15,7 +15,7 @@ if (-not (Test-Path -LiteralPath $taskPython)) {
     & $taskBootstrap -m venv --system-site-packages (Join-Path $PSScriptRoot '.venv')
     if ($LASTEXITCODE -ne 0) { throw 'Python 3.11+ is required.' }
 }
-& $taskPython -c "import importlib.util, sys; sys.exit(0 if all(importlib.util.find_spec(m) for m in ('httpx', 'bs4')) else 1)"
+& $taskPython -c "import importlib.util, importlib.metadata, sys; sys.exit(0 if all(importlib.util.find_spec(m) for m in ('httpx', 'bs4', 'jieba')) and importlib.metadata.version('jieba') == '0.42.1' else 1)"
 if ($LASTEXITCODE -ne 0) {
     & $taskPython -m pip install -e .
     if ($LASTEXITCODE -ne 0) { throw 'Dependency installation failed. Check your internet connection.' }

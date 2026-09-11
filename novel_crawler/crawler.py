@@ -3,11 +3,13 @@ import json
 import re
 import time
 import unicodedata
+import logging
 from urllib.parse import urljoin, urlsplit
 from urllib.robotparser import RobotFileParser
 
 import httpx
 from bs4 import BeautifulSoup
+from .source_cleanup import deduplicate_document
 
 
 def chapter_number(title):
@@ -64,6 +66,9 @@ def parse_content(html, selector, limits):
     paragraphs = [re.sub(r'[\t \u3000]+', ' ', line).strip()
                   for line in node.get_text('\n').splitlines()]
     paragraphs = [p for p in paragraphs if p]
+    paragraphs, repetition = deduplicate_document(paragraphs)
+    if repetition:
+        logging.info('Removed repeated whole source document: %s copies', repetition['copies'])
     text = '\n'.join(paragraphs)
     if not limits['min_chapter_characters'] <= len(text) <= limits['max_chapter_characters']:
         raise ValueError('Chapter length outside bounds; possibly truncated or app-only')
@@ -84,9 +89,15 @@ class Crawler:
         self.robots = {}
 
     def _get(self, url):
+        if getattr(self, 'stop', None) is not None and self.stop.is_set():
+            raise InterruptedError('Crawl stopped; resume on next manual run')
         delay = self.cfg['request_interval_seconds'] - (time.monotonic() - self.last_request)
         if delay > 0:
-            time.sleep(delay)
+            if getattr(self, 'stop', None) is not None:
+                if self.stop.wait(delay):
+                    raise InterruptedError('Crawl stopped; resume on next manual run')
+            else:
+                time.sleep(delay)
         self.last_request = time.monotonic()
         with httpx.Client(timeout=self.cfg['timeout_seconds'], follow_redirects=False,
                           headers={'User-Agent': self.cfg['user_agent']}) as client:

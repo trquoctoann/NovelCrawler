@@ -7,13 +7,20 @@ import math
 from pathlib import Path
 import xml.etree.ElementTree as ET
 from zipfile import ZipFile, ZIP_DEFLATED, ZIP_STORED
+import unicodedata
+
+from .completion import is_complete, chapter_text
+from .reading import reading_paragraphs
 
 
-CSS = '''body { font-family: serif; margin: 0; line-height: 1.4; }
+CSS = '''@page { margin: 0; }
+body { font-family: serif; margin: 0 2%; line-height: 1.4; }
 p { text-indent: 1.2em; margin: 0; text-align: justify; widows: 2; orphans: 2; }
 h1, h2 { text-align: center; text-indent: 0; margin: 1.2em 0; }
 section { break-before: page; page-break-before: always; }
 nav li { margin-bottom: .35em; }
+.missing { text-indent: 0; text-align: left; font-style: italic; margin: 1em 0; }
+.source-note { text-indent: 0; text-align: left; font-size: .9em; margin: 1em 0; }
 '''
 
 
@@ -27,11 +34,9 @@ def xhtml(title, content):
 
 def export_book(store, book, output_dir, preview=False):
     rows = store.db.execute('SELECT * FROM chapters WHERE book_id=? ORDER BY number', (book['id'],)).fetchall()
-    complete = (book['completed'] and len(rows) == book['expected_chapters'] and
-                [r['number'] for r in rows] == list(range(1, book['expected_chapters'] + 1)) and
-                all(r['state'] == 'edited' and r['edited'] for r in rows))
+    complete = is_complete(store, book)
     if not preview and not complete:
-        raise ValueError('Final export requires a completed book with every chapter edited')
+        raise ValueError('Final export requires every chapter edited or explicitly recorded as missing')
     if preview:
         contiguous = []
         for n, row in enumerate(rows, 1):
@@ -44,8 +49,16 @@ def export_book(store, book, output_dir, preview=False):
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     path = output_dir / (book['id'] + ('.preview' if preview else '') + '.epub')
+    if not preview:
+        prior = store.db.execute('SELECT * FROM final_artifacts WHERE book_id=?', (book['id'],)).fetchone()
+        if prior:
+            frozen = Path(prior['path'])
+            if not frozen.is_file() or verify_epub(frozen) != prior['sha256']:
+                raise ValueError('Final EPUB missing or modified; restore the recorded artifact before delivery')
+            return frozen
     temp = path.with_suffix('.epub.tmp')
-    uid = 'urn:novel:' + book['id']
+    uid = 'urn:novel:' + book['id'] + (f':chapters-1-{rows[-1]["number"]}' if preview else '')
+    edition_title = book['title'] + (f' — Chương 1–{rows[-1]["number"]}' if preview else '')
     files = {'style.css': CSS}
     toc, manifest, spine = [], [], []
     group_size = max(20, math.ceil(len(rows) / 200))
@@ -53,13 +66,15 @@ def export_book(store, book, output_dir, preview=False):
         name = f'part-{group_index // group_size + 1:04}.xhtml'
         sections = []
         for row in rows[group_index:group_index + group_size]:
-            edited = json.loads(row['edited'])
+            edited = chapter_text(row)
             label = f"Chương {row['number']}: {edited['title']}"
             anchor = f"ch-{row['number']}"
+            attr = ' class="missing"' if row['state'] == 'missing' else ''
             sections.append(f'<section id="{anchor}"><h2>{escape(label)}</h2>' +
-                            ''.join('<p>' + escape(p['text']) + '</p>' for p in edited['paragraphs']) + '</section>')
+                            ''.join(f'<p{attr}>' + escape(text) + '</p>'
+                                    for text in reading_paragraphs(edited['paragraphs'])) + '</section>')
             toc.append(f'<li><a href="{name}#{anchor}">{escape(label)}</a></li>')
-        files[name] = xhtml(book['title'], ''.join(sections))
+        files[name] = xhtml(edition_title, ''.join(sections))
         if len(files[name].encode()) > 25_000_000:
             raise ValueError('XHTML part too large')
         item_id = f'part{group_index}'
@@ -70,7 +85,7 @@ def export_book(store, book, output_dir, preview=False):
     opf = ('<?xml version="1.0" encoding="utf-8"?>'
            '<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="book-id">'
            '<metadata xmlns:dc="http://purl.org/dc/elements/1.1/">'
-           f'<dc:identifier id="book-id">{uid}</dc:identifier><dc:title>{escape(book["title"])}</dc:title>'
+           f'<dc:identifier id="book-id">{uid}</dc:identifier><dc:title>{escape(edition_title)}</dc:title>'
            f'<dc:creator>{escape(book["author"])}</dc:creator><dc:language>vi</dc:language>'
            f'<dc:source>{escape(book["source_url"])}</dc:source><meta property="dcterms:modified">{modified}</meta>'
            '</metadata><manifest><item id="css" href="style.css" media-type="text/css"/>'
@@ -88,6 +103,9 @@ def export_book(store, book, output_dir, preview=False):
             z.writestr('OEBPS/' + name, content)
     verify_epub(temp)
     temp.replace(path)
+    if not preview:
+        store.db.execute('INSERT INTO final_artifacts VALUES(?,?,?)',
+                         (book['id'], verify_epub(path), str(path.resolve())))
     return path
 
 

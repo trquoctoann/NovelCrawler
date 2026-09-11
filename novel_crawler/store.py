@@ -52,6 +52,49 @@ CREATE TABLE IF NOT EXISTS source_reviews (
  book_id TEXT NOT NULL, number INTEGER NOT NULL, reason TEXT NOT NULL,
  PRIMARY KEY(book_id,number)
 );
+CREATE TABLE IF NOT EXISTS provider_pauses (
+ provider TEXT PRIMARY KEY, retry_at REAL NOT NULL, reason TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS worker_progress (
+ book_id TEXT NOT NULL, job TEXT NOT NULL, updated REAL NOT NULL, detail TEXT,
+ PRIMARY KEY(book_id,job)
+);
+CREATE TABLE IF NOT EXISTS final_artifacts (
+ book_id TEXT PRIMARY KEY, sha256 TEXT NOT NULL, path TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS book_terms (
+ book_id TEXT NOT NULL, source TEXT NOT NULL, translation TEXT NOT NULL,
+ chapter INTEGER NOT NULL, PRIMARY KEY(book_id,source)
+);
+CREATE TABLE IF NOT EXISTS edited_history (
+ book_id TEXT NOT NULL, number INTEGER NOT NULL, revision TEXT NOT NULL,
+ edited TEXT NOT NULL, PRIMARY KEY(book_id,number,revision)
+);
+CREATE TABLE IF NOT EXISTS reviewed_responses (
+ call_id INTEGER PRIMARY KEY REFERENCES calls(id), response TEXT NOT NULL,
+ original_hash TEXT NOT NULL, source_hash TEXT NOT NULL, reason TEXT NOT NULL,
+ created REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS manual_requests (
+ id INTEGER PRIMARY KEY, book_id TEXT NOT NULL, chapter INTEGER NOT NULL,
+ stage TEXT NOT NULL, source_hash TEXT NOT NULL, style_revision TEXT NOT NULL,
+ call_id INTEGER NOT NULL REFERENCES calls(id), path TEXT NOT NULL,
+ state TEXT NOT NULL DEFAULT 'pending', created REAL NOT NULL,
+ imported REAL, submission_hash TEXT, submission TEXT, error TEXT,
+ UNIQUE(book_id,chapter,stage,source_hash,style_revision)
+);
+CREATE TABLE IF NOT EXISTS glossary_reviews (
+ parent_call_id INTEGER NOT NULL REFERENCES calls(id),
+ provider TEXT NOT NULL, review_call_id INTEGER NOT NULL UNIQUE REFERENCES calls(id),
+ PRIMARY KEY(parent_call_id,provider)
+);
+CREATE TABLE IF NOT EXISTS glossary_decisions (
+ review_call_id INTEGER NOT NULL REFERENCES calls(id), book_id TEXT NOT NULL,
+ chapter INTEGER NOT NULL, source_hash TEXT NOT NULL, paragraph_id INTEGER NOT NULL,
+ source_start INTEGER NOT NULL, source TEXT NOT NULL, canonical TEXT NOT NULL,
+ source_quote TEXT NOT NULL, translation_quote TEXT NOT NULL, reason TEXT NOT NULL,
+ PRIMARY KEY(review_call_id,paragraph_id,source_start)
+);
 '''
 
 
@@ -64,6 +107,17 @@ class Store:
         self.db.execute('PRAGMA journal_mode=WAL')
         self.db.execute('PRAGMA foreign_keys=ON')
         self.db.executescript(SCHEMA)
+        columns = {r[1] for r in self.db.execute('PRAGMA table_info(calls)')}
+        for name, definition in [('error', 'TEXT'), ('retry_at', 'REAL NOT NULL DEFAULT 0'),
+                                 ('failure_kind', 'TEXT'), ('glossary_context', 'TEXT'),
+                                 ('source_input_hash', 'TEXT'),
+                                 ('style_revision', "TEXT NOT NULL DEFAULT 'legacy'")]:
+            if name not in columns:
+                self.db.execute(f'ALTER TABLE calls ADD COLUMN {name} {definition}')
+        if 'kind' not in {r[1] for r in self.db.execute('PRAGMA table_info(book_terms)')}:
+            self.db.execute("ALTER TABLE book_terms ADD COLUMN kind TEXT NOT NULL DEFAULT 'entity'")
+        if 'style_revision' not in {r[1] for r in self.db.execute('PRAGMA table_info(books)')}:
+            self.db.execute("ALTER TABLE books ADD COLUMN style_revision TEXT NOT NULL DEFAULT 'legacy'")
 
     @contextmanager
     def transaction(self):

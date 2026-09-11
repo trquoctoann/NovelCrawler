@@ -7,7 +7,7 @@ name = "novel-crawler"
 version = "0.1.0"
 description = "Local incremental Chinese novel translation pipeline"
 requires-python = ">=3.11"
-dependencies = ["httpx>=0.28,<1", "beautifulsoup4>=4.12,<5"]
+dependencies = ["httpx>=0.28,<1", "beautifulsoup4>=4.12,<5", "jieba==0.42.1"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8,<10"]
