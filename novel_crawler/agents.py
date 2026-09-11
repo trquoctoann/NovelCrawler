@@ -16,7 +16,8 @@ SCHEMA = {
     'type': 'object', 'additionalProperties': False,
     'required': ['title', 'paragraphs', 'continuity', 'issues'],
     'properties': {
-        'title': {'type': 'string'},
+        'title': {'type': 'string', 'pattern': r'\S',
+                  'description': 'Nonempty Vietnamese title; for a number-only heading use Chuong N with Vietnamese accents.'},
         'paragraphs': {'type': 'array', 'items': {
             'type': 'object', 'additionalProperties': False,
             'required': ['id', 'text'], 'properties': {

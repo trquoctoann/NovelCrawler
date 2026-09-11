@@ -1,5 +1,6 @@
 from pathlib import Path
 import re
+import json
 import tomllib
 
 
@@ -22,6 +23,25 @@ def load(path: str) -> dict:
             raise ValueError('contextual_terms must be a list of source terms')
         if book['expected_chapters'] < 1:
             raise ValueError('expected_chapters must be positive')
+        for flag in ('literal_titles', 'allow_missing_chapters'):
+            if flag in book and type(book[flag]) is not bool:
+                raise ValueError(f'{flag} must be a boolean')
+        if book.get('toc_mode', 'numbered') not in ('numbered', 'ordered'):
+            raise ValueError('Unknown TOC mode')
+        if book.get('reference_manifest'):
+            manifest_path = source.parent / book['reference_manifest']
+            manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
+            if (manifest['original_title'] != book['original_title'] or manifest['author'] != book['author']
+                    or manifest['source_url'] != book['source_url']):
+                raise ValueError('Reference manifest identifies a different book or edition')
+            entries = manifest['chapters']
+            if ([e['number'] for e in entries] != list(range(1, book['expected_chapters'] + 1))
+                    or any(type(e['word_count']) is not int or e['word_count'] < 1 for e in entries)
+                    or len({e['url'] for e in entries}) != len(entries)):
+                raise ValueError('Reference manifest must contain complete unique chapters and word counts')
+            book['_reference_entries'] = entries
+        if book.get('toc_mode') == 'ordered' and not book.get('_reference_entries'):
+            raise ValueError('Ordered TOC requires reference_manifest')
         book['glossary'] = source.parent / book['glossary']
         if book.get('rendering_aliases'):
             book['rendering_aliases'] = source.parent / book['rendering_aliases']
@@ -29,12 +49,17 @@ def load(path: str) -> dict:
         # books with one configured source as to books with several sources.
         if not book.get('sources'):
             book['sources'] = [dict(id='primary', **{k: book[k] for k in (
-                'source_url', 'toc_selector', 'content_selector', 'encoding')})]
+                'source_url', 'toc_selector', 'content_selector', 'encoding', 'toc_mode') if k in book})]
         source_ids = set()
         for entry in book.get('sources', []):
             if not re.fullmatch(r'[a-z0-9][a-z0-9-]{0,79}', entry['id']) or entry['id'] in source_ids:
                 raise ValueError('Source IDs must be unique safe slugs within a book')
             source_ids.add(entry['id'])
+            entry.setdefault('literal_titles', book.get('literal_titles', False))
+            if entry.get('reference_titles') and not book.get('_reference_entries'):
+                raise ValueError('Source reference_titles requires a pinned reference manifest')
+            if entry.get('toc_mode', 'numbered') not in ('numbered', 'ordered', 'jjwxc'):
+                raise ValueError('Unknown source TOC mode')
             for key in ('source_url', 'toc_selector', 'encoding'):
                 if not isinstance(entry.get(key), str) or not entry[key]:
                     raise ValueError(f'Source requires {key}')

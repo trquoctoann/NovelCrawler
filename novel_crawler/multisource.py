@@ -39,7 +39,10 @@ class MultiSourceCrawler(Crawler):
                         time.time() + 300 * 2 ** (attempts - 1), None, 0))
             try:
                 entries = catalog(self.fetch(source['source_url'], source['encoding']), source, book)
-                mapping = align(canonical, entries)
+                matching_canonical = ([dict(number=e['number'], title=e['original_title'])
+                                       for e in book['_reference_entries']]
+                                      if source.get('reference_titles') else canonical)
+                mapping = align(matching_canonical, entries, literal=book.get('literal_titles', False))
                 with self.store.transaction():
                     db.execute('DELETE FROM source_candidates WHERE book_id=? AND source_id=?', (book['id'], source['id']))
                     for i, e in enumerate(entries):
@@ -116,6 +119,12 @@ class MultiSourceCrawler(Crawler):
                 try:
                     html = self.fetch(candidate['url'], source['encoding'])
                     paragraphs = extract_chapter(html, source, candidate['title'], self.cfg)
+                    reference = book.get('_reference_entries')
+                    if reference:
+                        expected = reference[ch['number'] - 1]['word_count']
+                        actual = len(''.join(paragraphs))
+                        if not expected * .95 <= actual <= expected * 1.10:
+                            raise ValueError(f'Body length {actual} differs from reference {expected}; review edition/truncation')
                     text, digest = body_fingerprint(paragraphs)
                     duplicate = next((n for n, old in existing if overlap(text, old) >= .85), None)
                     if duplicate is not None:

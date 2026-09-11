@@ -52,7 +52,9 @@ For example 郭仓三兄弟 means "ba anh em Quách Thương", not "ba anh em nh
 Do not soften cruelty, add motives, embellish imagery or shorten actual content.
 
 Return one translated paragraph for each source paragraph with the identical ID,
-in order. Do not merge, drop or duplicate paragraphs. The title is separate.
+in order. Do not merge, drop or duplicate paragraphs. The title is separate and must never be empty. For a number-only source heading
+(such as 第3章), return the Vietnamese label "Chương 3" as title; do not invent
+a descriptive subtitle or omit the title because it only contains a number.
 The output array must have exactly expected_paragraph_count items (or the number
 of source items when that field is absent). Include every ID through the final
 source ID, even beyond 100. Check the final paragraph before completing the JSON.

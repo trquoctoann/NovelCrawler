@@ -67,7 +67,9 @@ def export_book(store, book, output_dir, preview=False):
         sections = []
         for row in rows[group_index:group_index + group_size]:
             edited = chapter_text(row)
-            label = f"Chương {row['number']}: {edited['title']}"
+            number_label = f"Chương {row['number']}"
+            label = (number_label if edited['title'].strip().casefold() == number_label.casefold()
+                     else f"{number_label}: {edited['title']}")
             anchor = f"ch-{row['number']}"
             attr = ' class="missing"' if row['state'] == 'missing' else ''
             sections.append(f'<section id="{anchor}"><h2>{escape(label)}</h2>' +

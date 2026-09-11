@@ -36,6 +36,17 @@ def chapter_number(title):
 
 
 def parse_toc(html, book):
+    if book.get('toc_mode') == 'ordered':
+        from .alignment import catalog
+        entries = catalog(html, book, book)
+        reference = book.get('_reference_entries', [])
+        if len(entries) != book['expected_chapters'] or len(reference) != len(entries):
+            raise ValueError('Ordered TOC requires a complete pinned reference manifest')
+        if any((entry['number'], entry['title'], entry['url']) !=
+               (ref['number'], ref['source_title'], ref['url'])
+               for entry, ref in zip(entries, reference)):
+            raise ValueError('Ordered TOC changed from the verified edition manifest')
+        return entries
     soup = BeautifulSoup(html, 'html.parser')
     chapters = {}
     for a in soup.select(book['toc_selector']):
@@ -131,6 +142,10 @@ class Crawler:
         raw = self._get(url)
         if raw is None:
             raise ValueError('Source returned 404')
+        if encoding == 'gb18030-html':
+            # Some public JJWXC pages contain an invalid byte in an advertising
+            # script. Body parsing still rejects every replacement character.
+            return raw.decode('gb18030', errors='replace')
         return raw.decode(encoding) # Fail on broken encoding rather than translating garbage
 
     def run(self, book, batch):

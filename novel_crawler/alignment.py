@@ -4,7 +4,7 @@ from difflib import SequenceMatcher
 import hashlib
 import re
 import unicodedata
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import urljoin, urlsplit, parse_qs
 
 from bs4 import BeautifulSoup
 
@@ -23,6 +23,12 @@ def title_key(title):
     return normalized(title)
 
 
+def matching_key(title, literal=False):
+    # Number-only chapter titles have no subtitle to strip. Preserve the entire
+    # label in an explicitly pinned edition, including prologues and extras.
+    return normalized(title) if literal else title_key(title)
+
+
 def catalog(html, source, book):
     soup = BeautifulSoup(html, 'html.parser')
     # Metadata must be present on the catalog itself, not supplied by the caller.
@@ -30,14 +36,30 @@ def catalog(html, source, book):
     if normalized(book['original_title']) not in visible or normalized(book['author']) not in visible:
         raise ValueError('Catalog does not identify the expected book and author')
     entries, seen = [], {}
+    ordered = source.get('toc_mode') == 'ordered'
+    jjwxc = source.get('toc_mode') == 'jjwxc'
+    literal = book.get('literal_titles', False)
     for a in soup.select(source['toc_selector']):
         title = unicodedata.normalize('NFKC', a.get_text(' ', strip=True)).removeprefix('最近更新:')
-        if not re.search(r'第[0-9零〇一二两三四五六七八九十百千万]+章', title):
+        if not (ordered or jjwxc) and not re.search(r'第[0-9零〇一二两三四五六七八九十百千万]+章', title):
             continue
         url = urljoin(source['source_url'], a.get('href', ''))
         if urlsplit(url).netloc != urlsplit(source['source_url']).netloc:
             raise ValueError('Cross-host chapter link')
-        key = title_key(title)
+        if jjwxc:
+            query = parse_qs(urlsplit(url).query)
+            expected_book = parse_qs(urlsplit(source['source_url']).query).get('novelid')
+            row = a.find_parent('tr')
+            number = int(query.get('chapterid', ['0'])[0])
+            if (query.get('novelid') != expected_book or number < 1 or row is None
+                    or row.select_one('td').get_text(strip=True) != str(number)):
+                raise ValueError('JJWXC chapter link disagrees with its catalog row')
+            # The public site publishes HTTP links; HTTPS is supported on the
+            # same host. Never follow VIP purchase links or use another host.
+            url = url.replace('http://', 'https://', 1)
+        else:
+            number = len(entries) + 1 if ordered else chapter_number(title)
+        key = matching_key(title, literal)
         if not key:
             continue
         if url in seen:
@@ -45,7 +67,7 @@ def catalog(html, source, book):
                 raise ValueError('Same chapter URL has conflicting titles')
             continue
         seen[url] = key
-        entries.append({'number': chapter_number(title), 'title': title, 'key': key, 'url': url})
+        entries.append({'number': number, 'title': title, 'key': key, 'url': url})
     if not entries:
         raise ValueError('Empty source catalog')
     # A latest-chapter banner can precede the main catalog. Sort only when numeric
@@ -55,14 +77,15 @@ def catalog(html, source, book):
     return entries
 
 
-def align(canonical, candidate):
+def align(canonical, candidate, literal=False):
     """Return index -> (canonical number, evidence); ambiguous identities stay out."""
-    canonical_counts = Counter(title_key(e['title']) for e in canonical)
-    source_counts = Counter(title_key(e['title']) for e in candidate)
-    unique = {title_key(e['title']): e['number'] for e in canonical
-              if canonical_counts[title_key(e['title'])] == 1}
+    key_for = lambda title: matching_key(title, literal)
+    canonical_counts = Counter(key_for(e['title']) for e in canonical)
+    source_counts = Counter(key_for(e['title']) for e in candidate)
+    unique = {key_for(e['title']): e['number'] for e in canonical
+              if canonical_counts[key_for(e['title'])] == 1}
     anchors = {i: unique[key] for i, e in enumerate(candidate)
-               if (key := title_key(e['title'])) in unique and source_counts[key] == 1}
+               if (key := key_for(e['title'])) in unique and source_counts[key] == 1}
     result = {}
     for i, number in anchors.items():
         neighbors = [(j, anchors[j]) for j in (i - 1, i + 1) if j in anchors]
@@ -77,12 +100,12 @@ def align(canonical, candidate):
     # Repeated titles only resolve inside two unique anchors with an exact,
     # gapless title sequence. No fuzzy title or number-only acceptance.
     pairs = sorted(result)
-    by_number = {e['number']: title_key(e['title']) for e in canonical}
+    by_number = {e['number']: key_for(e['title']) for e in canonical}
     for left, right in zip(pairs, pairs[1:]):
         low, high = result[left][0], result[right][0]
         if right - left != high - low or right - left < 2:
             continue
-        if all(title_key(candidate[i]['title']) == by_number.get(low + i - left)
+        if all(key_for(candidate[i]['title']) == by_number.get(low + i - left)
                for i in range(left + 1, right)):
             for i in range(left + 1, right):
                 result[i] = (low + i - left, 'title-sequence+two-anchors')
@@ -110,7 +133,9 @@ def overlap(a, b):
 def extract_chapter(html, source, expected_title, limits):
     soup = BeautifulSoup(html, 'html.parser')
     heading = soup.select_one(source.get('title_selector', 'h1'))
-    if heading is None or title_key(heading.get_text(' ', strip=True)) != title_key(expected_title):
+    key = lambda title: matching_key(title, source.get('literal_titles', False))
+    actual = heading.get_text(' ', strip=True).removeprefix(source.get('title_prefix', '')) if heading else ''
+    if heading is None or key(actual) != key(expected_title):
         raise ValueError('Page title differs from mapped catalog chapter')
     if any(a.get_text(strip=True) in ('下一页', '下页', '继续阅读本章') for a in soup.select('a[href]')):
         raise ValueError('Split chapter needs an explicit pagination adapter')
@@ -146,6 +171,13 @@ def extract_chapter(html, source, expected_title, limits):
     else:
         selector = source['content_selector']
     paragraphs = parse_content(html, selector, limits)
+    if source.get('strip_author_notes', False):
+        for index, paragraph in enumerate(paragraphs):
+            if re.fullmatch(r'作者有话要说[：:]?', paragraph):
+                paragraphs = paragraphs[:index]
+                break
+        if len(''.join(paragraphs)) < limits['min_chapter_characters']:
+            raise ValueError('Body is too short after separating author notes')
     declared = re.search(r'本章字数[：:]\s*([0-9,]+)', soup.get_text())
     if declared:
         expected = int(declared[1].replace(',', ''))

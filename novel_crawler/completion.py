@@ -3,6 +3,8 @@ import json
 
 
 def finalize_missing(store, book):
+    if not book.get('allow_missing_chapters', True):
+        return 0
     db = store.db
     sources = book.get('sources', [])
     if not sources:
@@ -35,7 +37,7 @@ def is_complete(store, book):
     return (book['completed'] and len(rows) == book['expected_chapters'] and
             [r['number'] for r in rows] == list(range(1, book['expected_chapters'] + 1)) and
             all((r['state'] == 'edited' and r['edited']) or
-                (r['state'] == 'missing' and r['summary']) for r in rows))
+                (book.get('allow_missing_chapters', True) and r['state'] == 'missing' and r['summary']) for r in rows))
 
 
 def chapter_text(row):

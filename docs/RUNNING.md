@@ -12,15 +12,17 @@ Set-Location -LiteralPath 'D:\Project\NovelCrawler'
 
 By default, `start.cmd` runs the entire pipeline: **crawl → translate → edit → export the final EPUB → process Kindle delivery**. Run the same command again to resume saved progress. No cronjob is needed. The process exits when no more work can be done in the current invocation; it does not wait for the next day to resume automatically.
 
-**Local configuration at the time of writing:**
+**Local configuration after migration on September 11, 2026:**
+
+The active book is [Trường Phong Độ](../books/chang-feng-du/README.md), with a pinned 176-entry manifest. The previous book remains stored and disabled.
 
 | Setting | Local value | Meaning |
 |---|---|---|
-| Book | `han-men-bai-jia-zi`, `enabled = false` | The previous book is paused while a new book is being selected. Starting the app does not enable it automatically. |
-| Primary agent | `provider = "agy"` | Gemini 3.8 Flash high through Antigravity. |
-| Gemini policy refusal | `policy_fallback_provider = "codex_cli"` | Routes that chapter to Terra medium. This is not a fallback for Gemini quota exhaustion. |
+| Book | `chang-feng-du`, `enabled = true` | Trường Phong Độ (长风渡 / 嫁纨绔), 墨书白; all 176 entries required. |
+| Primary agent | `provider = "codex_cli"` | ChatGPT Terra medium; Gemini is disabled. |
+| Fallback | None | No automatic switch to Gemini. |
 | Contextual glossary review | `contextual_glossary_review = true` | May make an additional small review call for ambiguous two-character names. |
-| Aggregate call/token budgets | All four daily/total ceilings are `0` | Those ceilings are disabled. Call intervals, timeouts and per-chapter/stage attempt limits still apply. |
+| Aggregate call/token budgets | 48 calls/day, 4,000 total; 2M reserved tokens/day, 180M total | Existing accounting and ceilings are retained. |
 | Batch sizes | Crawl `5`, translate `1`, edit `1` | Limits each batch, not the entire invocation. |
 | Kindle delivery | `enabled = true`, `transport = "gmail_connector"` | The script prepares an outbox. An external connector must send the email. |
 
@@ -192,7 +194,7 @@ Edit `config.toml`, then restart the manual runner to apply changes. `start` rea
 | `codex_cli` | `gpt-5.6-terra` | `medium` |
 | `gemini_cli` | `gemini-3.8-flash` | `high` |
 
-Gemini primary, Terra on policy refusal — current setup:
+Optional configuration: Gemini primary, Terra on policy refusal:
 
 ```toml
 [agent]
@@ -216,10 +218,10 @@ Gemini policy fallback requires an explicit content refusal. Quota exhaustion, a
 
 | Key | Meaning | Current local value |
 |---|---|---:|
-| `calls_per_day` | Calls per UTC day, shared across books and stages. | `0` |
-| `calls_total` | Calls across the entire DB. | `0` |
-| `reserved_tokens_per_day` | Reserved tokens per UTC day. | `0` |
-| `reserved_tokens_total` | Reserved tokens across the entire DB. | `0` |
+| `calls_per_day` | Calls per UTC day, shared across books and stages. | `48` |
+| `calls_total` | Calls across the entire DB. | `4000` |
+| `reserved_tokens_per_day` | Reserved tokens per UTC day. | `2000000` |
+| `reserved_tokens_total` | Reserved tokens across the entire DB. | `180000000` |
 | `min_call_interval_seconds` | Minimum interval between calls. | `30` |
 | `max_attempts_per_chapter_stage` | Content attempts scoped to chapter/stage, provider/model, style revision and source. | `2` |
 
@@ -249,7 +251,9 @@ Only the **four aggregate daily/total ceilings** accept `0` to disable them. Oth
 | `min_chapter_characters`, `max_chapter_characters` | Length thresholds for detecting unusually short/long chapters; example defaults: `500`–`30000`. |
 | `user_agent` | User-Agent string; empty uses HTTPX's default identification. |
 
-Each source/candidate has persisted attempt counts and retry times. “All sources exhausted” means **all configured sources**, not an unlimited Internet search. A chapter still unavailable after that process becomes `missing`, receives a note at its position in the EPUB, and later chapters continue. An agent policy refusal is not treated as a missing source chapter.
+Each source/candidate has persisted attempt counts and retry times. “All sources exhausted” means **all configured sources**, not an unlimited Internet search. With the default `allow_missing_chapters=true`, a chapter still unavailable after that process becomes `missing`, receives a note at its position in the EPUB, and later chapters continue. An agent policy refusal is not treated as a missing source chapter.
+
+For `chang-feng-du`, `allow_missing_chapters=false`: missing content remains under review and blocks the final edition. Its ordered TOC is checked against `reference_manifest`; literal titles retain prologue and extra labels. Chapter length must match 95–110% of the reference word count.
 
 ## 7. Preview EPUBs and quality review
 

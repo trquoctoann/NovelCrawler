@@ -1,0 +1,40 @@
+# Append this block to a local config; pause other books before starting.
+
+[[books]]
+id = "chang-feng-du"
+title = "Trường Phong Độ"
+original_title = "长风渡"
+author = "墨书白"
+expected_chapters = 176
+completed = true
+enabled = true
+allow_missing_chapters = false
+source_url = "https://www.kanunu8.com/book5/changfengdu/"
+toc_selector = ".mulu-list a[href]"
+toc_mode = "ordered"
+literal_titles = true
+content_selector = "#neirong"
+encoding = "gb18030"
+glossary = "books/chang-feng-du/glossary.json"
+reference_manifest = "books/chang-feng-du/reference-manifest.json"
+
+[[books.sources]]
+id = "kanunu"
+source_url = "https://www.kanunu8.com/book5/changfengdu/"
+toc_selector = ".mulu-list a[href]"
+toc_mode = "ordered"
+encoding = "gb18030"
+content_selector = "#neirong"
+title_selector = "h1"
+title_prefix = "长风渡 正文 "
+strip_author_notes = true
+
+[[books.sources]]
+id = "jjwxc-free"
+source_url = "https://www.jjwxc.net/onebook.php?novelid=3415053"
+toc_selector = "tr[itemprop~='chapter'] [itemprop='headline'] a[href][itemprop='url']"
+toc_mode = "jjwxc"
+reference_titles = true
+encoding = "gb18030-html"
+content_selector = "#paragraph_comment_content"
+title_selector = ".noveltext h2"
